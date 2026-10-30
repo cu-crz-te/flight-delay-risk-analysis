@@ -12,12 +12,19 @@ How does departure delay risk vary with time, airline, route and demand conditio
 
 These are model-based associations and scenario estimates, not causal effects or evidence of operational changes.
 
-## Approach
+## Methods
 
-1. Clean and engineer flight, time and route variables; explore patterns.
-2. Fit a binomial logistic GLM and compare main effects and interaction models using likelihood-ratio tests and AIC.
-3. Check diagnostics and conduct a full-year back-test.
-4. Compare estimated delay probabilities under specified scenarios.
+1. **Data Cleaning:** Excluded cancelled and diverted flights and removed unsuitable or incomplete records before modeling
+2. **Exploratory Data Analysis:** Examined distributions and delay patterns across time, routes, and airlines to inform predictor selection
+3. **Variable Transformation:** Log-transformed distance, grouped airports and departure times, and created holiday and peak indicators
+4. **Main-effects Logistic Modeling:** Built a binomial logistic GLM to estimate departure delay probability using timing, route, demand, and carrier variables
+5. **Model Selection (Backward AIC):** Evaluated a main-effects specification with backward AIC selection
+6. **Interaction Testing:** Tested whether relationships differed across conditions, including carrier by distance, time, peak, and holiday
+7. **Model Comparison (LRT & AIC):** Compared nested models with likelihood-ratio tests and candidate specifications with AIC; the selected model included carrier-by-distance and carrier-by-time interactions
+8. **Model Diagnostics:** Examined collinearity, dispersion, residuals, and influential observations
+9. **Statistical Inference:** Interpreted coefficients, interaction terms, and significance tests in the context of the model
+10. **Scenario & Sensitivity Analysis:** Compared modeled probabilities under defined lower- and higher-risk conditions using absolute and relative sensitivity
+11. **Full-year Back-testing:** Compared reported fitted-sample and full-year accuracy. The latter is a same-year back-test, not an independent holdout; its code is commented out in the supplied notebook
 
 ## Repository contents
 
@@ -38,4 +45,4 @@ The original notebook requires R and the packages `car`, `formattable`, `fBasics
 
 ## Credits
 
-Team academic project for Business Analytics at National Taiwan University.
+Team academic project for Business Analytics at National Taiwan University. Team member names and student IDs have been removed from the report. No license is specified; contact the authors before reuse.
