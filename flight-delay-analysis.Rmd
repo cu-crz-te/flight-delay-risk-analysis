@@ -1,0 +1,1303 @@
+```{r}
+####-------------------------------------------------------------------------####
+####  Final Project: MLR Model Building (Flight Data) - Memory Optimized
+####-------------------------------------------------------------------------####
+
+# ===========================================================================
+# [0] 環境設定與資料讀取
+# ===========================================================================
+
+## 1. 載入套件
+packages <- c("car", "formattable", "fBasics", "dplyr", "tidyr", "ggplot2", "scales")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+df <- read.csv("flight_data_2024.csv",
+               header = TRUE,
+               stringsAsFactors = TRUE)
+```
+
+### 1 資料處理
+
+```{r}
+# ==============================================================================
+# [1] 資料處理
+# ==============================================================================
+clean_and_engineer_features <- function(df, ref_top_origins = NULL, ref_top_dests = NULL) {
+
+  cat("\n#### Processing Data: Cleaning & Feature Engineering ####\n")
+
+  # --- 0. 設定參數與清單 ---
+  holiday_list_2024 <- c(
+    "2024-01-01", "2024-01-15", "2024-02-02", "2024-02-14", "2024-02-19",
+    "2024-03-17", "2024-03-29", "2024-03-30", "2024-03-31", "2024-04-01",
+    "2024-05-05", "2024-05-12", "2024-05-27", "2024-06-16", "2024-07-04",
+    "2024-09-02", "2024-09-11", "2024-10-14", "2024-10-31", "2024-11-11",
+    "2024-11-28", "2024-11-29", "2024-12-24", "2024-12-25", "2024-12-31"
+  )
+
+  # --- 1. 建立特徵 (Features) ---
+  df <- df %>%
+    mutate(
+      is_delayed = if_else(dep_delay > 15, 1, 0),
+      fl_date = as.Date(fl_date),
+      holiday = if_else(fl_date %in% as.Date(holiday_list_2024) | day_of_week %in% c(6, 7), 1, 0),
+      peak_time = if_else(
+        (crs_dep_time >= 600  & crs_dep_time <= 859)  |
+        (crs_dep_time >= 1000 & crs_dep_time <= 1159) |
+        (crs_dep_time >= 1700 & crs_dep_time <= 1859),
+        1, 0
+      )
+    )
+
+  # --- 2. 排除取消與轉降 (Filtering) ---
+  initial_rows <- nrow(df)
+  df_clean <- df %>% filter(cancelled == 0, diverted == 0)
+  cat(sprintf("Excluded cancelled/diverted. Rows: %d -> %d\n", initial_rows, nrow(df_clean)))
+
+  # --- 3. 數值變數變換 ---
+  df_clean <- df_clean %>%
+    mutate(
+      log_dep_delay = log(dep_delay + 100),
+      log_distance  = log(distance + 1),
+      log_air_time  = log(air_time + 1)
+    )
+
+  # --- 4. 類別變數整併 (Lumping) - 關鍵修改 ---
+
+  # (A) Origin 處理
+  if(is.null(ref_top_origins)) {
+    cat("Calculating Top 20 Origins (Training Mode)...\n")
+    top_origins <- names(sort(table(df_clean$origin), decreasing=T))[1:20]
+  } else {
+    cat("Using Provided Top 20 Origins (Validation Mode)...\n")
+    top_origins <- ref_top_origins
+  }
+
+  # (B) Dest 處理
+  if(is.null(ref_top_dests)) {
+    cat("Calculating Top 20 Dests (Training Mode)...\n")
+    top_dests <- names(sort(table(df_clean$dest), decreasing=T))[1:20]
+  } else {
+    cat("Using Provided Top 20 Dests (Validation Mode)...\n")
+    top_dests <- ref_top_dests
+  }
+
+  # 應用 Top 20
+  df_clean$origin_grp <- factor(ifelse(df_clean$origin %in% top_origins, as.character(df_clean$origin), "Other"),
+                                levels = c(top_origins, "Other"))
+
+  df_clean$dest_grp <- factor(ifelse(df_clean$dest %in% top_dests, as.character(df_clean$dest), "Other"),
+                              levels = c(top_dests, "Other"))
+
+  # --- 5. 時間變數分箱 (Binning) ---
+  df_clean$time_block <- cut(df_clean$crs_dep_time,
+                             breaks = c(0, 600, 1200, 1800, 2400),
+                             labels = c("Night", "Morning", "Afternoon", "Evening"),
+                             include.lowest = TRUE)
+
+  # --- 6. 建立建模資料集 (Subsetting) ---
+  modeling_vars <- c(
+    "is_delayed", "log_distance", "log_air_time",
+    "op_unique_carrier", "origin_grp", "dest_grp",
+    "time_block", "month", "day_of_week", "holiday", "peak_time"
+  )
+
+  existing_vars <- modeling_vars[modeling_vars %in% names(df_clean)]
+  df_model_full <- df_clean[, existing_vars]
+
+  # --- 7. 建模資料轉型 (Factor Conversion) ---
+  cat_vars <- c("op_unique_carrier", "origin_grp", "dest_grp", "time_block", "month", "day_of_week")
+  for(v in cat_vars) {
+    if(v %in% names(df_model_full)) {
+      df_model_full[[v]] <- as.factor(df_model_full[[v]])
+    }
+  }
+
+  cat("Processing Complete.\n")
+
+  # --- 8. 回傳 List ---
+  return(list(
+    df_clean = df_clean,           # 完整資料
+    df_model_full = df_model_full, # 建模用資料
+    top_origins = top_origins,     # 算出來的(或沿用的) Top 20 Origin
+    top_dests = top_dests          # 算出來的(或沿用的) Top 20 Dest
+  ))
+}
+```
+
+```{r}
+# 1. 執行函數，將結果存入一個 list 物件 (例如叫 processed_data)
+processed_data <- clean_and_engineer_features(df)
+
+# 2. 取出資料
+df_model_full <- processed_data$df_model_full
+df_clean <- processed_data$df_clean # 給 EDA 用
+
+# 3. 保存 Top 20 清單給回測用
+saved_top_origins <- processed_data$top_origins
+saved_top_dests   <- processed_data$top_dests
+
+# 檢查
+dim(df_clean)       # 欄位較多
+dim(df_model_full)  # 欄位較少 (建模用)
+```
+
+### 2 EDA
+
+```{r}
+# ==============================================================================
+# [2] EDA
+# ==============================================================================
+
+# 0. 相關係數列表 & 散佈圖
+cat("\n#### [Step 4] Bivariate Analysis (Y vs All X) ####\n")
+
+# -------------------------------------------------------
+# 0. 前置設定 (確保欄位存在)
+# -------------------------------------------------------
+
+# (a) 設定資料來源：使用清洗後的 df_clean
+target_df <- df_clean
+y_var_name <- "dep_delay"  # 設定目標變數
+
+# (b) 確保 Y 存在
+if (!y_var_name %in% names(target_df)) {
+  stop("錯誤：資料中找不到 'dep_delay' 欄位，請確認 df_clean 是否正確。")
+}
+
+# (c) 定義要分析的 X (數值變數)
+wanted_nums <- c("weather_delay", "carrier_delay", "late_aircraft_delay",
+                 "nas_delay", "security_delay", "distance", "air_time",
+                 "crs_dep_time", "dep_time", "arr_delay", "wheels_off", "taxi_out")
+vars_num <- intersect(wanted_nums, names(target_df))
+
+# (d) 定義要分析的 X (類別變數)
+vars_cat <- names(target_df)[sapply(target_df, function(x) is.factor(x) || is.character(x))]
+vars_cat <- setdiff(vars_cat, c("fl_date", "tail_num"))
+
+cat("分析目標 Y:", y_var_name, "\n")
+
+# -------------------------------------------------------
+# 1. 執行分析
+# -------------------------------------------------------
+
+Y <- target_df[[y_var_name]]
+
+if (is.numeric(Y)) {
+
+  # 排除 Y 自己
+  x_nums_only <- setdiff(vars_num, y_var_name)
+  x_cats_only <- setdiff(vars_cat, y_var_name)
+
+  # -------------------------------------------------------
+  # 3.1 數值 X vs 數值 Y (Correlation List + Scatterplot)
+  # -------------------------------------------------------
+  if (length(x_nums_only) > 0) {
+
+    cat("\n== Correlation Coefficients (Sorted by Strength with Y) ==\n")
+
+    # 1. 計算相關係數 (只計算 X 與 Y 的關係，不看 X 與 X)
+    cor_vals <- cor(target_df[, x_nums_only], Y, use = "pairwise.complete.obs")
+
+    # 2. 整理成漂亮的表格
+    cor_table <- data.frame(
+      Variable = rownames(cor_vals),
+      Correlation = as.numeric(cor_vals)
+    )
+
+    # 3. 排序 (由高到低)
+    cor_table <- cor_table[order(cor_table$Correlation, decreasing = TRUE), ]
+
+    # 4. 印出列表 (不印矩陣)
+    print(cor_table, row.names = FALSE)
+
+    cat("\n-- Plotting Scatterplots (Check Plots Pane) --\n")
+
+    # 繪製散佈圖 (加上趨勢線)
+    for (v in x_nums_only) {
+      plot(target_df[[v]], Y, main = paste(y_var_name, "vs", v),
+           xlab = v, ylab = y_var_name,
+           pch = 16, col = rgb(0,0,0,0.2), cex=0.6)
+
+      abline(lm(Y ~ target_df[[v]]), col = "red", lwd = 2)
+    }
+  }
+
+  # -------------------------------------------------------
+  # 3.2 類別 X vs 數值 Y (Boxplots)
+  # -------------------------------------------------------
+  if (length(x_cats_only) > 0) {
+    cat("\n-- Plotting Boxplots (Check Plots Pane) --\n")
+
+    for (v in x_cats_only) {
+      # 依中位數排序
+      mu <- tapply(Y, target_df[[v]], median, na.rm=TRUE)
+      if (all(is.na(mu))) next
+      mu[is.na(mu)] <- 0
+      ord_labels <- names(sort(mu, decreasing=TRUE))
+
+      # 若類別太多只取前 20
+      if (length(ord_labels) > 20) ord_labels <- ord_labels[1:20]
+
+      # 繪圖
+      sub_df <- target_df %>% filter(.data[[v]] %in% ord_labels)
+      sub_df[[v]] <- factor(sub_df[[v]], levels = ord_labels)
+
+      boxplot(sub_df[[y_var_name]] ~ sub_df[[v]],
+              main = paste(y_var_name, "by", v),
+              xlab = "", ylab = y_var_name,
+              las = 2, col = "lightyellow")
+    }
+  }
+
+} else {
+  cat("\n[Info] Y 為類別變數，跳過數值型雙變數繪圖。\n")
+}
+
+par(mfrow = c(1, 1))
+```
+
+```{r}
+# 0. 班機延誤狀況
+plot_data <- df_clean %>%
+  group_by(is_delayed) %>%
+  summarise(Count = n()) %>%
+  mutate(
+    Percentage = Count / sum(Count),
+    Label = paste0(round(Percentage * 100, 1), "%")
+  ) %>%
+  mutate(Status = ifelse(is_delayed == 1, "Delayed", "On Time"))
+
+ggplot(plot_data, aes(x = Status, y = Count, fill = Status)) +
+  geom_bar(stat = "identity", width = 0.6) +
+
+  geom_text(aes(label = paste0(comma(Count), "\n(", Label, ")")),
+            vjust = -0.5, size = 5, fontface = "bold") +
+
+  scale_fill_manual(values = c("Delayed" = "#E74C3C",
+                               "On Time" = "#2ECC71")) +
+
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+
+  labs(title = "Distribution of Flight Delays",
+       x = "Flight Status",
+       y = "Number of Flights") +
+
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.text.x = element_text(size = 12),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+# 1. 不同航空公司的延誤狀況
+plot_data_ready <- df_clean %>%
+  mutate(
+    Status = factor(ifelse(is_delayed == 1, "Delayed", "On-Time"),
+                    levels = c("On-Time", "Delayed")) # 設定順序
+  )
+
+cat_var <- "op_unique_carrier" #  可換成 "month", "time_block", "origin_grp"
+
+rank_order <- plot_data_ready %>%
+  filter(Status == "Delayed") %>%
+  group_by(.data[[cat_var]]) %>%
+  summarise(Delayed_Count = n()) %>%
+  # arrange(desc(Delayed_Count)) %>% # 若多到少排列
+  pull(.data[[cat_var]])
+
+summary_data <- plot_data_ready %>%
+  group_by(.data[[cat_var]], Status) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+
+  # --- 計算延誤百分比 ---
+  group_by(.data[[cat_var]]) %>%
+  mutate(
+    Total_In_Group = sum(Count),
+    Pct = Count / Total_In_Group,
+    Label_Text = paste0(percent(Pct, accuracy = 0.1), "\n(", comma(Count), ")")
+  ) %>%
+  ungroup() %>%
+  # ------------------------------------
+
+mutate(!!cat_var := factor(.data[[cat_var]], levels = rank_order))
+
+ggplot(summary_data, aes(x = .data[[cat_var]], y = Count, fill = Status)) +
+  geom_bar(stat = "identity", alpha = 0.85, width = 0.7) +
+
+  geom_text(aes(label = Label_Text),
+            position = position_stack(vjust = 0.5),
+            size = 3,
+            color = "white",
+            fontface = "bold",
+            lineheight = 0.8) +
+
+  scale_fill_manual(values = c("On-Time" = "#2ECC71", "Delayed" = "#E74C3C")) +
+
+  scale_y_continuous(labels = comma) +
+
+  labs(
+    title = paste("Flight Volume & Delay Rate by", cat_var),
+    x = paste0(cat_var),
+    y = "Number of Flights",
+    fill = "Flight Status"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+# 2. distance 的分布圖
+histo_data <- plot_data_ready %>%
+  mutate(bin_start = floor(distance / 100) * 100) %>%
+  filter(distance <= 3500) %>%
+  group_by(bin_start) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+ggplot(histo_data, aes(x = bin_start, y = count)) +
+  geom_bar(stat = "identity", width = 95, fill = "#336699", color = NA, alpha = 0.9,
+           position = position_nudge(x = 50)) +
+  geom_text(aes(label = comma(count)),
+            position = position_nudge(x = 50),
+            angle = 90,
+            vjust = 0.5,
+            hjust = -0.2,
+            size = 3) +
+
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.2))) +
+  scale_x_continuous(labels = comma, breaks = seq(0, 3500, by = 500)) +
+
+  labs(
+    title = "Distribution of Flight Distance",
+    x = "Distance (miles)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray50")
+  )
+
+
+# 3. 各個時段的班次數
+
+hourly_data <- plot_data_ready %>%
+  mutate(Hour = floor(dep_time / 100)) %>%
+
+  filter(!is.na(Hour)) %>%
+
+  group_by(Hour) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+ggplot(hourly_data, aes(x = factor(Hour), y = Count)) +
+  geom_bar(stat = "identity", fill = "steelblue", width = 0.7) +
+  geom_text(aes(label = comma(Count)),
+            angle = 90,
+            hjust = -0.1,
+            vjust = 0.5,
+            size = 3) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.1))) +
+
+  labs(
+    title = "Total Flights by Hour of Day",
+    x = "Hour of Day",
+    y = "Number of Flights"
+  ) +
+
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.text.x = element_text(size = 10)
+  )
+
+
+# 4. 機場的分佈圖
+
+cat_var <- "origin"
+
+top_20_airports <- plot_data_ready %>%
+  count(.data[[cat_var]]) %>%
+  slice_max(n, n = 20) %>%
+  pull(.data[[cat_var]])
+
+filtered_data <- plot_data_ready %>%
+  filter(.data[[cat_var]] %in% top_20_airports)
+
+rank_order <- filtered_data %>%
+  group_by(.data[[cat_var]]) %>%
+  summarise(Total_Volume = n()) %>%
+  arrange(desc(Total_Volume)) %>% # 由大到小排序
+  pull(.data[[cat_var]])
+
+summary_data <- filtered_data %>%
+  group_by(.data[[cat_var]], Status) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+
+  # --- 計算延誤百分比---
+  group_by(.data[[cat_var]]) %>%
+  mutate(
+    Total_In_Group = sum(Count),
+    Pct = Count / Total_In_Group,
+    Label_Text = paste0(percent(Pct, accuracy = 0.1), "\n(", comma(Count), ")")
+  ) %>%
+  ungroup() %>%
+
+  mutate(!!cat_var := factor(.data[[cat_var]], levels = rank_order))
+
+ggplot(summary_data, aes(x = .data[[cat_var]], y = Count, fill = Status)) +
+  geom_bar(stat = "identity", alpha = 0.85, width = 0.7) +
+  geom_text(aes(label = Label_Text),
+            position = position_stack(vjust = 0.5),
+            size = 2.5,
+            color = "white",
+            fontface = "bold",
+            lineheight = 0.8) +
+
+  scale_fill_manual(values = c("On-Time" = "#2ECC71", "Delayed" = "#E74C3C")) +
+
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.1))) +
+
+  labs(
+    title = paste("Top 20 Airports by Flight Volume"),
+    x = "Airport Code",
+    y = "Number of Flights",
+    fill = "Flight Status"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+
+    plot.margin = margin(t = 10, r = 10, b = 20, l = 10, unit = "pt")
+  )
+
+# 延誤狀態 x（時段、星期、尖峰、假日）
+
+draw_stack_plot <- function(data, x_var, title_text, x_axis_label = NULL) {
+  if(is.null(x_axis_label)) x_axis_label <- x_var
+
+  # 計算數量與百分比
+  plot_df <- data %>%
+    group_by(.data[[x_var]], Status) %>%
+    summarise(Count = n(), .groups = 'drop_last') %>%
+    mutate(
+      Total = sum(Count),
+      Pct = Count / Total,
+      Label_Text = paste0(percent(Pct, accuracy = 0.1), "\n(", comma(Count), ")")
+    ) %>%
+    ungroup()
+
+  # 畫圖
+  p <- ggplot(plot_df, aes(x = factor(.data[[x_var]]), y = Count, fill = Status)) +
+    geom_bar(stat = "identity", width = 0.65) +
+
+    geom_text(aes(label = Label_Text),
+              position = position_stack(vjust = 0.5),
+              size = 3,
+              color = "white",
+              fontface = "bold",
+              lineheight = 0.8) +
+
+    scale_fill_manual(values = c("On-Time" = "#66CC66", "Delayed" = "#D9534F")) +
+
+    labs(
+      title = title_text,
+      x = x_axis_label,
+      y = "Number of Flights",
+      fill = "Flight Status"
+    ) +
+    scale_y_continuous(labels = comma) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      panel.grid.major.x = element_blank(),
+      axis.text.x = element_text(size = 10)
+    )
+
+  print(p)
+}
+
+# 執行繪圖
+
+# 各時段 (time_block)
+draw_stack_plot(plot_data_ready, "time_block", "Flight Volume & Delay Rate by time_block")
+
+# 各星期 (day_of_week)
+draw_stack_plot(plot_data_ready, "day_of_week", "Flight Volume & Delay Rate by day_of_week")
+
+# 尖峰時段 (peak_time)
+draw_stack_plot(plot_data_ready, "peak_time", "Flight Volume & Delay Count by peak_time")
+
+# 假日 (holiday)
+draw_stack_plot(plot_data_ready, "holiday", "Flight Volume & Delay Rate by Holiday",
+                x_axis_label = "Holiday (0 = Non-Holiday, 1 = Holiday)")
+
+# 各月份 (month)
+  draw_stack_plot(plot_data_ready, "month", "Flight Volume & Delay Rate by month")
+
+
+# 6. 交互作用EDA
+
+# 每家航空公司在每個時段的延誤率
+interaction_data <- df_model_full %>%
+  group_by(op_unique_carrier, time_block) %>%
+  summarise(Delay_rate = mean(as.numeric(as.character(is_delayed))), .groups = 'drop')
+
+ggplot(interaction_data, aes(x = time_block, y = Delay_rate,
+                             group = op_unique_carrier, color = op_unique_carrier)) +
+  geom_line(size = 1) +
+  geom_point() +
+  labs(title = "Interaction: op_unique_carrier x time_block",
+       y = "delay rate", x = "time_block") +
+  theme_minimal()
+
+# 每個機場在不同距離下的延誤率
+plot_data_raw <- df_model_full %>%
+  mutate(dist_bin = round(log_distance, 1)) %>%
+
+  group_by(origin_grp, dist_bin) %>%
+  summarise(
+    Real_Delay_Rate = mean(as.numeric(as.character(is_delayed))),
+    Count = n(),
+    .groups = 'drop'
+  ) %>%
+
+  filter(Count > 30)
+
+ggplot(plot_data_raw, aes(x = dist_bin, y = Real_Delay_Rate,
+                          color = origin_grp, group = origin_grp)) +
+
+  geom_line(size = 1, alpha = 0.8) +
+
+  geom_point(size = 1.5) +
+
+  labs(title = "Interaction: Origin x Log Distance ",
+       y = "Delay Rate",
+       x = "Log Distance (Binned)",
+       color = "Airport") +
+
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+```
+
+### 3 Model
+
+```{r}
+# ===========================================================================
+# [3] 建立模型
+# ===========================================================================
+
+## 清理記憶體
+# 1. 找出所有屬性為 data.frame 的物件名稱
+dfs_to_remove <- ls()[sapply(ls(), function(x) any(class(get(x)) %in% "data.frame"))]
+
+# 2. 執行刪除
+if(length(dfs_to_remove) > 0) {
+  rm(list = dfs_to_remove)
+}
+
+# 3. 強制釋放記憶體
+gc()
+
+## 載入 200k sample
+
+df <- read.csv("flight_data_2024_sample_200k.csv",
+               header = TRUE,
+               stringsAsFactors = TRUE)
+```
+
+```{r}
+# 1. 執行函數，將結果存入一個 list 物件 (例如叫 processed_data)
+processed_data <- clean_and_engineer_features(df)
+
+# 2. 取出資料
+df_model <- processed_data$df_model_full
+df_clean <- processed_data$df_clean # 給 EDA 用
+
+# 3. 保存 Top 20 清單給回測用
+saved_top_origins <- processed_data$top_origins
+saved_top_dests   <- processed_data$top_dests
+
+# 檢查
+dim(df_model)  # 欄位較少 (建模用)
+```
+
+```{r}
+# 設定 Target Y
+target_y <- "is_delayed"
+
+# A. SLR 快速掃描 (在樣本上執行)
+cat("\n#### [Step 3] Simple Linear Regression (SLR) Screening ####\n")
+
+vars_num <- names(df_model)[sapply(df_model, is.numeric)]
+vars_num <- setdiff(vars_num, target_y)
+
+slr_results <- data.frame()
+
+for (x in vars_num) {
+  try({
+    form <- as.formula(paste(target_y, "~", x))
+    mod  <- lm(form, data = df_model)
+    s    <- summary(mod)
+
+    slr_results <- rbind(slr_results,
+                         data.frame(Variable = x,
+                                    Coefficient = coef(mod)[2],
+                                    P_Value = s$coefficients[2, 4],
+                                    R_Squared = s$r.squared))
+  }, silent = TRUE)
+}
+
+if (nrow(slr_results) > 0) {
+  slr_results <- slr_results[order(slr_results$R_Squared, decreasing = TRUE), ]
+  cat("\n== SLR Results (Top 10) ==\n")
+  print(format(head(slr_results, 10), digits=4))
+}
+
+
+# B. Full Model & VIF (在樣本上執行)
+cat("\n#### [Step 4] Full Model Construction & VIF Check ####\n")
+
+full_formula <- as.formula(paste(target_y, "~ . - log_air_time"))
+#model_full <- lm(full_formula, data = df_model)
+model_full <- glm(full_formula, family = binomial(link = "logit"), data = df_model) # GLM
+
+
+cat("\n== Full Model Summary (Brief) ==\n")
+cat("R-squared:", summary(model_full)$r.squared, "\n")
+cat("Adj R-squared:", summary(model_full)$adj.r.squared, "\n")
+
+cat("\n== VIF Check ==\n")
+tryCatch({
+  vif_vals <- vif(model_full)
+  # 簡單顯示 VIF (若為 GVIF 則顯示最後一欄)
+  if(is.matrix(vif_vals)) {
+    print(vif_vals[, ncol(vif_vals)])
+    cat("[Note] 數值為 GVIF^(1/(2*Df))。若 > 2 (相當於 VIF > 4) 需注意共線性。\n")
+  } else {
+    print(vif_vals)
+    if(any(vif_vals > 10)) cat("[Warning] 有變數 VIF > 10！\n")
+  }
+}, error = function(e) {
+  cat("[Skip] VIF 計算失敗 (可能存在完全共線)。\n")
+})
+
+
+# C. Stepwise Selection (AIC)
+cat("\n#### [Step 5] Stepwise Selection (Backward by AIC) ####\n")
+
+# D. 使用 backward selection (樣本數少，跑起來會快很多)
+model_main <- step(model_full, direction = "backward", trace = 0)
+
+cat("\n== Main Effects Model (After AIC Selection) ==\n")
+print(summary(model_main)$call)
+cat("AIC:", AIC(model_main), "\n")
+cat("Variables retained:", paste(names(coef(model_main)), collapse=", "), "\n")
+
+# 建立模型
+model_main <- glm(
+  is_delayed ~ log_distance + op_unique_carrier +
+    origin_grp + dest_grp + time_block + month +
+    day_of_week + holiday + peak_time,
+  family = binomial(link = "logit"),
+  data   = df_model
+)
+
+summary(model_main)
+
+model_aic2 <- step(model_main, direction = "backward", trace = 1)
+summary(model_aic2)
+AIC(model_main, model_aic2)
+
+# VIF / GVIF
+v <- vif(model_main)
+v
+```
+
+### 4 交互作用
+
+```{r}
+# ==============================================================================
+# [4] 交互作用項
+# ==============================================================================
+
+## 加入想測試的交互作用
+## 航司 x 距離, 航司 x 時段, 假日 x 航司, 尖峰時段 x 航司, 尖峰時段 x 假日
+model_base <- model_main
+
+
+## 航司 x 距離
+model_int_dist <- update(
+  model_base,
+  . ~ . + log_distance:op_unique_carrier
+)
+anova_int_dist <- anova(model_base, model_int_dist, test = "Chisq")
+AIC(model_base); AIC(model_int_dist) # 183504.8, 183425.5
+
+## 航司 x 時段
+model_int_time <- update(
+  model_base,
+  . ~ . + time_block:op_unique_carrier
+)
+anova_int_time <- anova(model_base, model_int_time, test = "Chisq")
+AIC(model_base); AIC(model_int_time) # 183504.8, 182980.5
+
+## 假日 x 航司
+model_int_holiday <- update(
+  model_base,
+  . ~ . + holiday:op_unique_carrier
+)
+anova_int_holiday <- anova(model_base, model_int_holiday, test = "Chisq")
+AIC(model_base); AIC(model_int_holiday) #183504.8, 183519.4 （不考慮加入)
+
+## 尖峰時段 x 航司
+model_int_peak <- update(
+  model_base,
+  . ~ . + peak_time:op_unique_carrier
+)
+anova_int_peak <- anova(model_base, model_int_peak, test = "Chisq")
+AIC(model_base); AIC(model_int_peak) #183504.8, 183401.2
+## 尖峰時段 x 假日
+model_peak_holiday <- update(
+  model_base,
+  . ~ . + peak_time:holiday
+)
+anova_peak_holiday <- anova(model_base, model_peak_holiday , test = "Chisq")
+AIC(model_base); AIC(model_peak_holiday ) #183504.8, 183506.7 （不考慮加入 可回答第三題)
+
+## 從三個交互作用裡面選應該加入的變數
+## 航司 x 距離, 航司 x 時段
+model_dist_time <- update(
+  model_base,
+  . ~ . + log_distance:op_unique_carrier + time_block:op_unique_carrier
+)
+anova_dist_time <- anova(model_base, model_dist_time, test = "Chisq")
+AIC(model_base); AIC(model_dist_time) #183504.8, 182889.6 (Best 選為最終模型)
+
+## 航司 x 具題, 尖峰時段 x 航司
+model_dist_peak <- update(
+  model_base,
+  . ~ . + log_distance:op_unique_carrier + peak_time:op_unique_carrier
+)
+anova_dist_peak <- anova(model_base, model_dist_peak, test = "Chisq")
+AIC(model_base); AIC(model_dist_peak) #183504.8, 183320.7
+
+## 時段 x 航司, 尖峰時段 x 航司
+model_time_peak <- update(
+  model_base,
+  . ~ . + time_block:op_unique_carrier + peak_time:op_unique_carrier
+)
+anova_time_peak <- anova(model_base, model_time_peak, test = "Chisq")
+AIC(model_base); AIC(model_time_peak) #183504.8, 182993.2
+
+## 航司 x 時段, 假日 x 航司, 尖峰時段 x 航司
+model_all <- update(
+  model_base,
+  . ~ . + time_block:op_unique_carrier + log_distance:op_unique_carrier + peak_time:op_unique_carrier
+)
+anova_all <- anova(model_base, model_all, test = "Chisq")
+AIC(model_base); AIC(model_all) #183504.8, 182902.8
+
+## 決定最終模型
+model_final <- glm(
+  is_delayed ~ log_distance + op_unique_carrier +
+    origin_grp + dest_grp + time_block + month +
+    day_of_week + holiday + peak_time +
+    log_distance:op_unique_carrier +
+    op_unique_carrier:time_block,
+  family = binomial(link = "logit"),
+  data   = df_model
+)
+
+summary(model_final)
+```
+
+### 5 模型檢驗
+
+```{r}
+# ==============================================================================
+# [5] 模型檢驗
+# ==============================================================================
+
+# 1. Final Model Diagnostics
+null_deviance  <- model_final$null.deviance # 196173.6
+resid_deviance <- model_final$deviance # 182621.6
+pseudo_R2_McF <- 1 - resid_deviance / null_deviance #  0.06908177
+
+
+# 2. Overdispersion
+pearson2 <- residuals(model_final, type = "pearson")
+phi <- sum(pearson2^2) / model_final$df.residual
+phi # 1.007402
+
+# 3. Deviance goodness-of-fit
+res_dev <- model_final$deviance
+df_res  <- model_final$df.residual
+p_gof   <- 1 - pchisq(res_dev, df_res)
+p_gof  # = 1
+
+# 4. Deviance residual vs fitted：
+dev_res    <- residuals(model_final, type = "deviance")
+fitted_val <- fitted(model_final)
+
+plot(fitted_val, dev_res,
+     xlab = "Fitted probabilities",
+     ylab = "Deviance residuals",
+     main = "Deviance residuals vs fitted")
+abline(h = 0, lty = 2)
+
+# 5. Cook's distance
+plot(model_final, which = 4)
+
+# 6. Null model vs final model 的 drop-in-deviance
+model_null <- glm(is_delayed ~ 1,
+                  family = binomial(link = "logit"),
+                  data   = df_model)
+
+anova(model_null, model_final, test = "Chisq")
+
+# 7. 共線性
+vif_vals <- vif(model_final)
+vif_vals
+if (is.matrix(vif_vals)) {
+  gvif_adj <- vif_vals[, "GVIF^(1/(2*Df))"]
+  gvif_adj
+}
+```
+
+### 6 回答題目
+
+```{r}
+# ===========================================================================
+# [6] 研究題目相關處理（Report 第四章）
+# ===========================================================================
+
+# 第一題
+
+# 建立 Odds Ratio Table (OR_tab)
+# 1. 提取係數與信賴區間
+est <- coef(model_final)
+se  <- summary(model_final)$coefficients[, 2]
+p_val <- summary(model_final)$coefficients[, 4]
+
+# 2. 計算 Odds Ratio (取 exponential)
+or_res <- exp(est)
+or_cil <- exp(est - 1.96 * se) # 95% 下界
+or_ciu <- exp(est + 1.96 * se) # 95% 上界
+
+# 3. 組合表格
+OR_tab <- data.frame(
+  OR      = or_res,
+  OR_LCL  = or_cil,
+  OR_UCL  = or_ciu,
+  p_value = p_val
+)
+
+vars_RQ1 <- c(
+  "log_distance",
+  "holiday",
+  "peak_time",
+  "time_blockMorning",
+  "time_blockAfternoon",
+  "time_blockEvening"
+)
+OR_RQ1 <- OR_tab[vars_RQ1, ]
+p <- OR_RQ1[, "p_value"]
+
+sig <- ifelse(p < 0.001, "***",
+              ifelse(p < 0.01,  "**",
+                     ifelse(p < 0.05,  "*",
+                            ifelse(p < 0.1,   ".",
+                                   ""))))
+
+OR_RQ1_star <- cbind(OR_RQ1, sig)
+OR_RQ1_star
+## 不同航空公司間延遲是否不同
+## anova檢定
+m_no_carrier <- update(model_final, . ~ . - op_unique_carrier)
+anova(m_no_carrier, model_final, test = "Chisq") #顯著
+
+## 列出前三家以及後三家
+vars_air_main <- grep("^op_unique_carrier[^:]*$", rownames(OR_tab), value = TRUE)
+OR_air_main <- OR_tab[vars_air_main, c("OR", "OR_LCL", "OR_UCL", "p_value")]
+OR_air_main_sorted <- OR_air_main[order(OR_air_main[, "OR"]), ]
+best3  <- head(OR_air_main_sorted, 3)
+worst3 <- tail(OR_air_main_sorted, 3)
+best3
+worst3
+
+
+# 第五題
+# 高延誤率時段與穩定公司
+# 找出高延誤的時段 ==> Evening & Afternoon
+
+overall_rate <- mean(df_clean$is_delayed)
+block_delay <- df_clean %>%
+  group_by(time_block) %>%
+  summarise(
+    delay_rate = mean(is_delayed),
+    n          = n()
+  ) %>%
+  ungroup() %>%
+  arrange(desc(delay_rate))
+overall_rate #  0.1986136
+block_delay # Evening & Afternoon > overall_rate
+
+# 找出平均延誤率最接近年平均延誤率的月份當作控制變因
+monthly_delay <- df_model %>%
+  group_by(month) %>%
+  summarise(delay_rate = mean(is_delayed)) %>%
+  ungroup()
+
+overall_rate_model <- mean(df_model$is_delayed)
+
+monthly_delay <- monthly_delay %>%
+  mutate(diff = abs(delay_rate - overall_rate_model)) %>%
+  arrange(diff)
+
+monthly_delay
+base_month <- monthly_delay$month[1]
+base_month # 12月最接近
+
+# 找出平均延誤率最接近年平均延誤率的星期幾當作控制變因
+weekly_delay <- df_model %>%
+  group_by(day_of_week) %>%
+  summarise(delay_rate = mean(is_delayed)) %>%
+  ungroup()
+
+weekly_delay <- weekly_delay %>%
+  mutate(diff = abs(delay_rate - overall_rate_model)) %>%
+  arrange(diff)
+
+weekly_delay # 星期一最接近
+base_dow <- weekly_delay$day_of_week[1]
+base_dow # 星期一最接近
+## 看尖峰時段是影響高延誤率
+peak_delay <- df_clean %>%
+  group_by(peak_time) %>%
+  summarise(
+    delay_rate = mean(is_delayed),
+    n          = n()
+  )
+peak_delay # 並未如預期 尖峰使段並不一定延遲率高
+
+## 設定控制其他變數的情境
+carriers <- levels(df_model$op_unique_carrier) # 航空公司清單
+median_log_distance <- median(df_model$log_distance, na.rm = TRUE) # 代表性距離：log_distance 中位數
+base_origin_grp <- "Other" # 機場群組：先用 "Other" 作為代表
+base_dest_grp   <- "Other" # 機場群組：先用 "Other" 作為代表
+library(tidyr)
+highrisk_scenarios <- expand.grid(
+  op_unique_carrier = carriers,
+  time_block        = c("Afternoon", "Evening"),
+  stringsAsFactors  = FALSE
+) %>%
+  mutate(
+    log_distance = median_log_distance,
+    origin_grp   = base_origin_grp,
+    dest_grp     = base_dest_grp,
+    month        = base_month,
+    day_of_week  = base_dow,
+    holiday      = 0,   # 平日情境
+    peak_time    = 0    # 控制變數
+  )
+
+highrisk_scenarios <- highrisk_scenarios %>%
+  mutate(
+    op_unique_carrier = factor(op_unique_carrier,
+                               levels = levels(df_model$op_unique_carrier)),
+    time_block        = factor(time_block,
+                               levels = levels(df_model$time_block)),
+    origin_grp        = factor(origin_grp,
+                               levels = levels(df_model$origin_grp)),
+    dest_grp          = factor(dest_grp,
+                               levels = levels(df_model$dest_grp)),
+    month             = factor(month,
+                               levels = levels(df_model$month)),
+    day_of_week       = factor(day_of_week,
+                               levels = levels(df_model$day_of_week))
+  )
+
+highrisk_scenarios$pred_delay <- predict(
+  model_final,
+  newdata = highrisk_scenarios,
+  type    = "response"
+)
+carrier_peak_summary <- highrisk_scenarios %>%
+  group_by(op_unique_carrier) %>%
+  summarise(
+    mean_peak = mean(pred_delay),  # 高風險時段的平均延誤風險（越低越好）
+    sd_peak   = sd(pred_delay),    # Afternoon vs Evening 的變異（越小越穩定）
+    max_peak  = max(pred_delay),   # 兩個裡面較差的那個時段
+    min_peak  = min(pred_delay),   # 兩個裡面較好的那個時段
+    .groups   = "drop"
+  ) %>%
+  arrange(mean_peak, sd_peak)
+head(carrier_peak_summary, 5) # 表現較佳、穩定的航司
+
+##回答5.2
+stable_carriers <- c("YX", "HA", "OO", "9E", "MQ")
+baseline_scenarios <- data.frame(
+  op_unique_carrier = carriers,
+  time_block        = "Morning",          # 一般非高風險時段
+  log_distance      = median_log_distance,
+  origin_grp        = base_origin_grp,
+  dest_grp          = base_dest_grp,
+  month             = base_month,
+  day_of_week       = base_dow,
+  holiday           = 0,                  # 平日
+  peak_time         = 0                   # 一般需求
+)
+baseline_scenarios <- baseline_scenarios %>%
+  mutate(
+    op_unique_carrier = factor(op_unique_carrier,
+                               levels = levels(df_model$op_unique_carrier)),
+    time_block        = factor(time_block,
+                               levels = levels(df_model$time_block)),
+    origin_grp        = factor(origin_grp,
+                               levels = levels(df_model$origin_grp)),
+    dest_grp          = factor(dest_grp,
+                               levels = levels(df_model$dest_grp)),
+    month             = factor(month,
+                               levels = levels(df_model$month)),
+    day_of_week       = factor(day_of_week,
+                               levels = levels(df_model$day_of_week))
+  )
+
+baseline_scenarios$pred_baseline <- predict(
+  model_final,
+  newdata = baseline_scenarios,
+  type    = "response"
+)
+
+baseline_summary <- baseline_scenarios %>%
+  select(op_unique_carrier, pred_baseline)
+combined <- carrier_peak_summary %>%
+  left_join(baseline_summary, by = "op_unique_carrier") %>%
+  mutate(
+    is_stable = op_unique_carrier %in% stable_carriers
+  )
+combined %>%
+  group_by(is_stable) %>%
+  summarise(
+    avg_peak     = mean(mean_peak),
+    avg_baseline = mean(pred_baseline),
+    .groups      = "drop"
+  )
+
+cor(combined$mean_peak, combined$pred_baseline) # 0.7460307
+
+# 第六題
+# 延誤敏感度 ranking
+# 建立兩個情境（非壅塞/壅塞)
+scen_all <- expand.grid(
+  op_unique_carrier = carriers,
+  scenario          = c("baseline", "congested"),
+  stringsAsFactors  = FALSE
+) %>%
+  mutate(
+    log_distance = median_log_distance,
+    origin_grp   = base_origin_grp,
+    dest_grp     = base_dest_grp,
+    month        = base_month,
+    day_of_week  = base_dow,
+
+    time_block = if_else(scenario == "baseline", "Morning", "Evening"),
+    holiday    = if_else(scenario == "baseline", 1, 0),
+    peak_time  = if_else(scenario == "baseline", 0, 1)  # 尖峰需求 only in congested
+  )
+## 對齊factors
+scen_all <- scen_all %>%
+  mutate(
+    op_unique_carrier = factor(op_unique_carrier,
+                               levels = levels(df_model$op_unique_carrier)),
+    time_block        = factor(time_block,
+                               levels = levels(df_model$time_block)),
+    origin_grp        = factor(origin_grp,
+                               levels = levels(df_model$origin_grp)),
+    dest_grp          = factor(dest_grp,
+                               levels = levels(df_model$dest_grp)),
+    month             = factor(month,
+                               levels = levels(df_model$month)),
+    day_of_week       = factor(day_of_week,
+                               levels = levels(df_model$day_of_week))
+  )
+
+## 模型算兩種情境的延誤機率
+scen_all$pred <- predict(
+  model_final,
+  newdata = scen_all,
+  type    = "response"
+)
+
+## 延誤敏感度 ranking
+ranking <- scen_all %>%
+  select(op_unique_carrier, scenario, pred) %>%
+  pivot_wider(
+    names_from  = scenario,
+    values_from = pred
+  ) %>%
+  mutate(
+    sensitivity_abs = congested - baseline,  # 延誤機率增加多少 → 絕對敏感度
+    sensitivity_rel = congested / baseline    # 延誤風險放大倍率 → 相對敏感度
+  ) %>%
+  arrange(sensitivity_abs)   # 感度越小越「撐得住壅塞」
+
+ranking
+```
+
+### 7 回測
+
+```{r}
+# # ===========================================================================
+# # [7] 全母體回測 (Full Data Validation)
+# # 註：此步驟需重新載入原資料（7M 筆），因此先進行註解避免記憶體運行超出負荷
+# # ===========================================================================
+#
+# # ---------------------------------------------------------------------------
+# # 0. 前置作業：備份訓練集定義
+# # ---------------------------------------------------------------------------
+#
+# if(exists("processed_data")) {
+#   # 如果剛剛是跑 processed_data <- clean_and_engineer_features(df)
+#   saved_top_origins <- processed_data$top_origins
+#   saved_top_dests   <- processed_data$top_dests
+# } else {
+#   # 萬一找不到，嘗試從 df_model 逆推 (備用方案)
+#   cat("[Info] Retrieving Top 20 from df_model factor levels...\n")
+#   saved_top_origins <- levels(df_model$op_unique_carrier) # 注意：這裡假設變數名正確，建議還是用上面的方法
+#   # 修正：直接抓取 levels
+#   if(exists("df_model")) {
+#      saved_top_origins <- levels(df_model$origin_grp)
+#      saved_top_origins <- saved_top_origins[saved_top_origins != "Other"] # 排除 Other
+#      saved_top_dests   <- levels(df_model$dest_grp)
+#      saved_top_dests   <- saved_top_dests[saved_top_dests != "Other"]
+#   }
+# }
+#
+# # 備份訓練集準確率
+# if(exists("model_final")) {
+#   acc_train_sample <- mean(ifelse(fitted(model_final) > 0.5, 1, 0) == model_final$y, na.rm=TRUE)
+# }
+#
+# # ---------------------------------------------------------------------------
+# # 1. 記憶體大掃除 (Memory Cleanup)
+# # ---------------------------------------------------------------------------
+# cat("Cleaning up memory to load full dataset...\n")
+#
+# # 列出要刪除的變數 (包含 Step 6 的情境表、舊的資料集)
+# objs_to_remove <- c(
+#   "df", "df_model", "df_clean", "df_model_full", "processed_data", # 資料
+#   "plot_data_ready", "interaction_data",                           # EDA
+#   "scen_all", "highrisk_scenarios", "baseline_scenarios",          # Step 6
+#   "combined", "ranking", "slr_results", "model_full"               # 其他
+# )
+#
+# # 執行刪除
+# rm(list = intersect(ls(), objs_to_remove))
+#
+# # 強制釋放記憶體
+# gc()
+#
+# # ---------------------------------------------------------------------------
+# # 2. 讀取與處理全母體 (使用 Function)
+# # ---------------------------------------------------------------------------
+# cat("Reading and Processing full 7M dataset... (This takes time)\n")
+#
+# # A. 讀取原始大檔
+# # 為了省記憶體，只讀取 Function 會用到的欄位
+# cols_needed <- c("dep_delay", "distance", "air_time", "fl_date",
+#                  "day_of_week", "crs_dep_time", "origin", "dest",
+#                  "op_unique_carrier", "month", "cancelled", "diverted")
+#
+# df_val_raw <- read.csv("flight_data_2024.csv", header = TRUE, stringsAsFactors = TRUE) %>%
+#   select(all_of(cols_needed))
+#
+# # B. 呼叫 Function 進行處理
+# # 傳入 ref_top_origins，告訴 Function 使用訓練集的標準
+# val_result <- clean_and_engineer_features(
+#   df_val_raw,
+#   ref_top_origins = saved_top_origins,
+#   ref_top_dests   = saved_top_dests
+# )
+#
+# # C. 取出需要的資料，並刪除原始檔以省空間
+# df_val_final <- val_result$df_model_full
+#
+# # 移除中間產物 (Raw data 和 包含完整欄位的 df_clean 都不要了，只留建模用的 df_model_full)
+# rm(df_val_raw, val_result)
+# gc()
+#
+# cat("Validation Data Prepared. Rows:", nrow(df_val_final), "\n")
+#
+# # ---------------------------------------------------------------------------
+# # 3. 預測與計算準確率 (Prediction)
+# # ---------------------------------------------------------------------------
+# cat("Predicting on full dataset...\n")
+#
+# # 使用 tryCatch 回傳向量，而不是在內部修改 dataframe
+# df_val_final$pred_prob <- tryCatch({
+#
+#   # 嘗試 1: 一次性預測
+#   predict(model_final, newdata = df_val_final, type = "response")
+#
+# }, error = function(e) {
+#
+#   cat("Memory limit hit (or other error). Switching to chunked prediction...\n")
+#
+#   # 嘗試 2: 分批預測 (Chunking)
+#   n <- nrow(df_val_final)
+#   chunk_size <- 500000
+#   probs <- numeric(n) # 先建立空向量
+#
+#   for(i in seq(1, n, by=chunk_size)) {
+#     idx <- i:min(i+chunk_size-1, n)
+#     # 這裡必須回傳給 probs 變數
+#     probs[idx] <- predict(model_final, newdata = df_val_final[idx, ], type = "response")
+#     # cat(sprintf("Processed chunk %d\r", i))
+#   }
+#
+#   return(probs) # 將算好的向量回傳出去
+# })
+#
+# # ---------------------------------------------------------------------------
+# # 4. 計算準確率與結果
+# # ---------------------------------------------------------------------------
+# # 檢查 pred_prob 是否成功建立
+# if(is.null(df_val_final$pred_prob) || length(df_val_final$pred_prob) == 0) {
+#   stop("預測失敗：pred_prob 為空，請檢查記憶體或模型狀態。")
+# }
+#
+# cat("Calculating accuracy...\n")
+#
+# df_val_final$pred_class <- if_else(df_val_final$pred_prob > 0.5, 1, 0)
+# accuracy_val <- mean(df_val_final$pred_class == df_val_final$is_delayed, na.rm = TRUE)
+#
+# library(scales)
+#
+# cat("\n========================================\n")
+# cat("   Validation Results (Simple Accuracy)   \n")
+# cat("========================================\n")
+# cat(sprintf("Training Sample Accuracy : %s\n", percent(acc_train_sample, accuracy = 0.01)))
+# cat(sprintf("Full Data Validation Accuracy : %s\n", percent(accuracy_val, accuracy = 0.01)))
+# cat("----------------------------------------\n")
+#
+# diff <- abs(acc_train_sample - accuracy_val)
+# if (diff < 0.02) {
+#   cat("\n[結論] 全母體準確率與樣本差異小 (差", percent(diff, accuracy=0.01), ")，模型穩健。\n")
+# } else {
+#   cat("\n[結論] 差異大於 2%，可能存在抽樣偏差，請檢查是否某些類別在樣本中未出現。\n")
+# }
+```
