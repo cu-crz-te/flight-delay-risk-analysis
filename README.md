@@ -45,4 +45,4 @@ Our notebook requires R and the packages `car`, `formattable`, `fBasics`, `dplyr
 
 ## Credits
 
-We completed this project as a team for a Business Analytics class at National Taiwan University. Names and student IDs have been removed from the report. No license is specified; please contact the authors before reusing the work.
+We completed this project as a team for a Business Analytics class at National Taiwan University.
