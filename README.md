@@ -28,12 +28,12 @@ These are model-based associations and scenario estimates, not causal effects or
 
 ## Repository contents
 
-- `flight-delay-analysis.Rmd`: original analysis notebook, with Chinese comments
-- `team-report.pdf`: original team report, in Chinese
+- `flight-delay-analysis.Rmd`: analysis notebook, translated into English from the original R Markdown
+- `team-report.pdf`: original class assignment, in Chinese
 
 ## Running the analysis
 
-The original notebook requires R and the packages `car`, `formattable`, `fBasics`, `dplyr`, `tidyr`, `ggplot2`, and `scales`. It installs missing packages itself. Download the 2024 dataset from Kaggle, follow its terms, and place `flight_data_2024.csv` in the working directory. The notebook also reads a separate `flight_data_2024_sample_200k.csv` from the working directory; that sample is not included. Open the notebook in RStudio and run its chunks in sequence after supplying both files. Review paths and package installation before running. The original code and report are preserved; a complete execution has not been verified here.
+The original notebook requires R and the packages `car`, `formattable`, `fBasics`, `dplyr`, `tidyr`, `ggplot2`, and `scales`. It installs missing packages itself. Download the 2024 dataset from Kaggle, follow its terms, and place `flight_data_2024.csv` in the working directory. The notebook also reads a separate `flight_data_2024_sample_200k.csv` from the working directory; that sample is not included. Open the notebook in RStudio and run its chunks in sequence after supplying both files. Review paths and package installation before running. The report remains in its original language as a class assignment. The notebook’s narrative, comments, and messages have been translated into English while preserving its analysis logic; a complete execution has not been verified here.
 
 ## Reproducibility and limitations
 
