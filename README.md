@@ -38,4 +38,4 @@ The original notebook requires R and the packages `car`, `formattable`, `fBasics
 
 ## Credits
 
-Team academic project for Business Analytics at National Taiwan University. Team member names and student IDs have been removed from the report. No license is specified; contact the authors before reuse.
+Team academic project for Business Analytics at National Taiwan University.
